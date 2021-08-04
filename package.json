@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "y-websocket": "^1.3.16",
+    "yjs": "^13.5.11"
+  },
+  "devDependencies": {
+    "shadow-cljs": "^2.15.2"
+  }
+}
