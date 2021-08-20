@@ -1,64 +1,73 @@
 (ns core
   (:require ["yjs" :as y]
             ["y-websocket" :as y-ws]
+            [rum.core :as rum]
             [clojure.zip :as zip]))
 
 
-(def ydoc1 (y/Doc.))
-(def ydoc2 (y/Doc.))
-;; (def wsProvider1 (y-ws/WebsocketProvider. "ws://192.168.1.149:1234", "demo", ydoc1))
+(def ydoc1 (y/Doc.))                    ;remote
+(def ydoc2 (y/Doc.))                    ;local
+(def wsProvider1 (y-ws/WebsocketProvider. "ws://192.168.1.149:1234", "demo", ydoc1))
 ;; (def wsProvider2 (y-ws/WebsocketProvider. "ws://192.168.1.149:1234", "demo", ydoc2))
 
 
-(def content1
-  {1 {:content "111"
-      2 {:content "222" :left 1}
-      3 {:content "333" :left 2
-         4 {:content "444" :left 3}}}})
+(def content5
+  [{:id "1" :content "111"}
+   [{:id "2" :content "222"} {:id "3" :content "333"} [{:id "4" :content "444"}]]
+   {:id "5" :content "555"}])
 
-(def content2
-  {1 {:content "111"
-      5 {:content "555" :left 1}}})
+(def content6
+  [{:id "1" :content "111"}
+   [{:id "2" :content "444"} {:id "6" :content "666"}]
+   {:id "5" :content "55"}])
 
-(def content3
-  {:content1 "222"})
 
-(def content4
-  {:content "333"})
+(defn ->content-map [content map]
+  (clojure.walk/postwalk (fn [v] (when (map? v)
+                                   (.set map (:id v) (y/Text. (:content v))))
+                           v) content))
 
-(defn ->map [content map]
-  (let [map (or map (y/Map.))]
-    (mapv (fn [[k v]]
+
+(defn ->struct-array [content arr content-map]
+  (let [arr (or arr (y/Array.))]
+    (mapv (fn [text-or-sub-arr]
             (cond
-              (number? k)
-              (.set map (str k) (->map v nil))
-              (= k :content)
-              (.set map (str k) (y/Text. v))
+              (vector? text-or-sub-arr)
+              (do
+                (let [child (->struct-array text-or-sub-arr nil content-map)]
+                  (when (> (.-length child) 0)
+                    (.push arr (clj->js [child])))))
 
               :else
-              (.set map (str k) v))) content)
-    map))
-
-
+              (do
+                (when (or (nil? content-map) (not (.has content-map (:id text-or-sub-arr))))
+                  ;; TODO  insert at right pos instead of push
+                  (.push arr (clj->js [(:id text-or-sub-arr)])))))) content)
+    arr))
 
 
 (defn init []
   (println "init"))
 
-(defn fill-doc [doc content]
-  (let [m (.getMap doc "content")]
-    (->map content m)))
+(defn fill-doc1 [doc content]
+  (let [structarr (.getArray doc "struct")
+        contentmap (.getMap doc "content")]
+    (->content-map content contentmap)
+    (->struct-array content structarr nil)))
 
-(defn set-m1 [doc]
-  (.set (.getMap doc "content") "k1" "v1"))
-(defn set-m2 [doc]
-  (.set (.getMap doc "content") "k2" "v2"))
+(defn fill-doc2 [doc content]
+  (let [structarr (.getArray doc "struct")
+        contentmap (.getMap doc "content")]
+    (->struct-array content structarr contentmap)
+    (->content-map content contentmap)))
+
 ;; const stateVector1 = Y.encodeStateVector(ydoc1)
 ;; const stateVector2 = Y.encodeStateVector(ydoc2)
 ;; const diff1 = Y.encodeStateAsUpdate(ydoc1, stateVector2)
 ;; const diff2 = Y.encodeStateAsUpdate(ydoc2, stateVector1)
 ;; Y.applyUpdate(ydoc1, diff2)
 ;; Y.applyUpdate(ydoc2, diff1)
+
 (defn merge-doc []
   (let [s1 (y/encodeStateVector ydoc1)
         s2 (y/encodeStateVector ydoc2)
@@ -80,31 +89,80 @@
 ;; doc2.on('update', update => {
 ;;   Y.applyUpdate(doc1, update)
 ;; })
+(def need-update (atom true))
 
 (defn update []
-  (.on ydoc1 "update" (fn [update] (y/applyUpdate ydoc2 update)))
-  (.on ydoc2 "update" (fn [update] (y/applyUpdate ydoc1 update))))
+  (.on ydoc1 "update" (fn [update]
+                        (y/applyUpdate ydoc2 update)))
+  (.on ydoc2 "update" (fn [update]
+                        (y/applyUpdate ydoc1 update)
+                        (swap! need-update #(not %))))
+  (.observe (.getArray ydoc2 "struct") (fn [event]
+                                         (println "event: " event))))
+
+(defn doc->unorder-list [struct contentmap]
+  [:ul
+   (for [child struct]
+     (if (instance? y/Array child)
+       (doc->unorder-list (js->clj (.toArray child)) contentmap)
+       [:li (str (.toString (.get contentmap child)) " #id: " child)]))])
+
+
+(rum/defc contents < rum/reactive
+  []
+  (let [need-update (rum/react need-update)
+        struct (js->clj (.toArray (.getArray ydoc2 "struct")))
+        contentmap (.getMap ydoc2 "content")]
+    (doc->unorder-list struct contentmap)))
 
 (defn start []
+  (update)
+  (merge-doc)
+  (fill-doc2 ydoc2 content5)
+  (rum/mount (contents) js/document.body)
+
   (println "start"))
 
 (defn stop []
   (println "stop"))
 
+(defn find-pos [struct id]
+  (let [toplevel (js->clj (.toArray struct))
+        index (.indexOf toplevel id)]
+    (if (not= -1 index)
+      [index]
+      (loop [i 0]
+        (if (>= i (count toplevel))
+          nil
+          (let [sublevel (get toplevel i)]
+            (if (instance? y/Array sublevel)
+              (if-let [index (find-pos sublevel id)]
+                (flatten [i index])
+                (recur (+ i 1)))
+              (recur (+ i 1)))))))))
+
+(defn append-block [id newid newcontent] ;;sibling?=true
+  (let [struct (.getArray ydoc2 "struct")
+        content (.getMap ydoc2 "content")]
+    (.set content newid (y/Text. newcontent))
+    (when-let [pos (find-pos struct id)]
+      ;; (if sibling?)
+      (let [pos* (conj (vec (butlast pos)) (inc (last pos)))
+            struct* (loop [i 0 s struct]
+                      (if (> i (- (count pos*) 2))
+                        s
+                        (do
+                          (println i)
+                          (recur (inc i) (.get s (get pos* i))))))]
+        (def xxx [pos pos* struct*])
+        (.insert struct* (last pos*) (clj->js [newid]))))))
+
+(defn modify-block [id index insert-content]
+  (let [content (.getMap ydoc2 "content")]
+    (.insert (.get content id) index insert-content)))
 
 (comment
-  (let [m1 (.getMap ydoc1 "m")
-        m2 (.getMap ydoc2 "m")]
-    (.set m1 "text" (y/Text.))
-    (.set m2 "text" (y/Text.))
-
-    (-> ydoc1
-        (.getMap "m")
-        (.get "text")
-        (.insert 0 "text1"))
-    (-> ydoc2
-        (.getMap "m")
-        (.get "text")
-        (.insert 0 "text2"))
-    )
+  (fill-doc1 ydoc1 content5)
+  (merge-doc)
+  (fill-doc2 ydoc2 content6)
   )
