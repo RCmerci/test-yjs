@@ -28,7 +28,7 @@
                            v) content))
 
 
-(defn ->struct-array [content arr content-map]
+(defn ->struct-array [content arr]
   (let [arr (or arr (y/Array.))]
     (mapv (fn [text-or-sub-arr]
             (cond
@@ -40,9 +40,7 @@
 
               :else
               (do
-                (when (or (nil? content-map) (not (.has content-map (:id text-or-sub-arr))))
-                  ;; TODO  insert at right pos instead of push
-                  (.push arr (clj->js [(:id text-or-sub-arr)])))))) content)
+                (.push arr (clj->js [(:id text-or-sub-arr)]))))) content)
     arr))
 
 
@@ -53,13 +51,8 @@
   (let [structarr (.getArray doc "struct")
         contentmap (.getMap doc "content")]
     (->content-map content contentmap)
-    (->struct-array content structarr nil)))
+    (->struct-array content structarr)))
 
-(defn fill-doc2 [doc content]
-  (let [structarr (.getArray doc "struct")
-        contentmap (.getMap doc "content")]
-    (->struct-array content structarr contentmap)
-    (->content-map content contentmap)))
 
 ;; const stateVector1 = Y.encodeStateVector(ydoc1)
 ;; const stateVector2 = Y.encodeStateVector(ydoc2)
@@ -96,9 +89,8 @@
                         (y/applyUpdate ydoc2 update)))
   (.on ydoc2 "update" (fn [update]
                         (y/applyUpdate ydoc1 update)
-                        (swap! need-update #(not %))))
-  (.observe (.getArray ydoc2 "struct") (fn [event]
-                                         (println "event: " event))))
+                        (distinct-struct (.get ydoc2 "struct") (atom #{}))
+                        (swap! need-update #(not %)))))
 
 (defn doc->unorder-list [struct contentmap]
   [:ul
@@ -118,7 +110,7 @@
 (defn start []
   (update)
   (merge-doc)
-  (fill-doc2 ydoc2 content5)
+  (fill-doc1 ydoc2 content5)
   (rum/mount (contents) js/document.body)
 
   (println "start"))
@@ -160,6 +152,34 @@
 (defn modify-block [id index insert-content]
   (let [content (.getMap ydoc2 "content")]
     (.insert (.get content id) index insert-content)))
+
+
+(defn distinct-struct [struct set]
+  (loop [i 0]
+    (when (< i (.-length struct))
+      (let [s (.get struct i)]
+        (if (instance? y/Array s)
+          (do
+            (distinct-struct s set)
+            (recur (inc i)))
+          (do
+            (if (contains? @set s)
+              (do
+                (.delete struct i 1)
+                (if (and
+                     (>= (dec i) 0)
+                     (< (inc i) (.-length struct))
+                     (instance? y/Array (.get struct (dec i)))
+                     (instance? y/Array (.get struct (inc i))))
+                  (do
+                    (distinct-struct (.get struct (inc i)) set)
+                    (.push (.get struct (dec i)) (.toArray (.get struct (inc i))))
+                    (.delete struct (inc i))
+                    (recur i))
+                  (recur (inc i))))
+              (do
+                (swap! set (fn [o] (conj o s)))
+                (recur (inc i))))))))))
 
 (comment
   (fill-doc1 ydoc1 content5)
